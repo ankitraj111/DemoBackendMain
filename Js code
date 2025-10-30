@@ -1,0 +1,239 @@
+const canvas = document.getElementById('sonar');
+const ctx = canvas.getContext('2d');
+
+// Tweak yahan se:
+const MIN_RANGE = 200;       // meters
+const MAX_RANGE = 800;       // meters
+const RANGES = [200, 400, 600, 800];
+const FOV = 120;             // forward arc (±60°)
+const BEAM_SPEED = 0.35;
+const BEAM_WIDTH = 8;
+
+const cx = canvas.width / 2;
+const cy = canvas.height - 28;
+const maxRadius = Math.min(canvas.width * 0.48, canvas.height - 80);
+
+const clamp = (v,a,b)=>Math.max(a,Math.min(b,v));
+const toRad = deg => (deg - 90) * Math.PI / 180;
+const polar = (angDeg, dist) => {
+  const r = (dist / MAX_RANGE) * maxRadius;
+  const a = toRad(angDeg);
+  return { x: cx + r * Math.cos(a), y: cy + r * Math.sin(a) };
+};
+
+function opticalScore(distance){
+  const t = (distance - MIN_RANGE) / (MAX_RANGE - MIN_RANGE); // 0..1
+  const base = 90 - t * 45; // 90 to 45
+  const noise = (Math.random() - 0.5) * 6; // slight jitter
+  return clamp(Math.round(base + noise), 10, 99);
+}
+
+function levelFromScore(score){
+  if (score >= 88) return {name:'Very High', color:'#2bff88', seg:5};
+  if (score >= 74) return {name:'High',      color:'#9cff4d', seg:4};
+  if (score >= 60) return {name:'Medium',    color:'#ffd24d', seg:3};
+  if (score >= 46) return {name:'Low',       color:'#ff944d', seg:2};
+  return                {name:'Very Low',    color:'#ff4d4d', seg:1};
+}
+
+// Use backend injected targets
+let targets = [];
+function initTargets() {
+  if (typeof backendTargets !== "undefined" && backendTargets.length) {
+    targets = backendTargets.map(t => ({
+      id: t.id,
+      angle: t.angle,
+      distance: t.distance,
+      size: t.size,
+      driftA: t.driftA,
+      driftD: t.driftD
+    }));
+  } else {
+    // Fallback to random generation
+    targets = [];
+    const n = 5 + Math.floor(Math.random() * 3);
+    for (let i=0;i<n;i++) {
+      targets.push({
+        id: 100+i,
+        angle: (Math.random() * (FOV - 16)) - (FOV/2 - 8),
+        distance: MIN_RANGE + Math.random() * (MAX_RANGE - MIN_RANGE),
+        size: 7 + Math.random() * 5,
+        driftA: (Math.random() - 0.5) * 0.06,
+        driftD: (Math.random() - 0.5) * 0.4
+      });
+    }
+  }
+}
+
+function drawBackgroundWedge(){
+  const a1 = toRad(-FOV/2), a2 = toRad(+FOV/2);
+  ctx.save();
+  ctx.beginPath();
+  ctx.moveTo(cx, cy);
+  ctx.arc(cx, cy, maxRadius, a1, a2, false);
+  ctx.closePath();
+
+  const g = ctx.createRadialGradient(cx, cy, maxRadius * 0.15, cx, cy, maxRadius);
+  g.addColorStop(0.00, 'rgba(0,70,140,0.92)');
+  g.addColorStop(0.60, 'rgba(0,55,110,0.94)');
+  g.addColorStop(1.00, 'rgba(0,35,75,0.96)');
+  ctx.fillStyle = g;
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawRangeArcs(){
+  const a1 = toRad(-FOV/2), a2 = toRad(+FOV/2);
+  ctx.strokeStyle = 'rgba(255,255,255,0.6)';
+  ctx.lineWidth = 1.4;
+
+  RANGES.forEach(m=>{
+    const r = (m / MAX_RANGE) * maxRadius;
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, a1, a2, false);
+    ctx.stroke();
+
+    ctx.fillStyle = '#ffe066';
+    ctx.font = '12px Arial';
+    const pL = { x: cx + r * Math.cos(a1), y: cy + r * Math.sin(a1) };
+    const pR = { x: cx + r * Math.cos(a2), y: cy + r * Math.sin(a2) };
+    ctx.fillText(`${m} m`, pL.x - 22, pL.y - 6);
+    ctx.fillText(`${m} m`, pR.x + 6,  pR.y - 6);
+  });
+
+  ctx.beginPath();
+  const pTop = polar(0, MAX_RANGE);
+  ctx.moveTo(cx, cy);
+  ctx.lineTo(pTop.x, pTop.y);
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = '#ffffff';
+  ctx.stroke();
+
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '12px Arial';
+  ctx.fillText('0°', pTop.x - 8, pTop.y - 8);
+}
+
+let beamAngle = -FOV/2;
+function drawScanBeam(){
+  const start = beamAngle - BEAM_WIDTH/2;
+  const end   = beamAngle + BEAM_WIDTH/2;
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.moveTo(cx, cy);
+  ctx.arc(cx, cy, maxRadius, toRad(start), toRad(end), false);
+  ctx.closePath();
+  const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, maxRadius);
+  grad.addColorStop(0, 'rgba(0,255,255,0.09)');
+  grad.addColorStop(1, 'rgba(0,255,255,0.0)');
+  ctx.fillStyle = grad;
+  ctx.fill();
+
+  ctx.beginPath();
+  const mid = toRad(beamAngle);
+  ctx.moveTo(cx, cy);
+  ctx.lineTo(cx + maxRadius * Math.cos(mid), cy + maxRadius * Math.sin(mid));
+  ctx.strokeStyle = '#9ff';
+  ctx.lineWidth = 2;
+  ctx.shadowBlur = 10;
+  ctx.shadowColor = '#9ff';
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+  ctx.restore();
+
+  beamAngle += BEAM_SPEED;
+  if (beamAngle > FOV/2) beamAngle = -FOV/2;
+}
+
+function drawOpticalBar(x, y, level){
+  const segW = 6, segH = 10, gap = 2;
+  for (let i=0;i<5;i++){
+    ctx.beginPath();
+    ctx.rect(x + i*(segW+gap), y, segW, segH);
+    ctx.fillStyle = i < level.seg ? level.color : 'rgba(255,255,255,0.16)';
+    ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+    ctx.lineWidth = 0.6;
+    ctx.fill(); ctx.stroke();
+  }
+}
+
+function drawTargets(){
+  ctx.save();
+  ctx.beginPath();
+  ctx.moveTo(cx, cy);
+  ctx.arc(cx, cy, maxRadius, toRad(-FOV/2), toRad(+FOV/2), false);
+  ctx.closePath();
+  ctx.clip();
+
+  targets.forEach(t=>{
+    t.angle += t.driftA;
+    t.distance += t.driftD;
+    if (Math.random() < 0.02) t.driftA *= -1;
+    if (Math.random() < 0.02) t.driftD *= -1;
+    t.angle = clamp(t.angle, -FOV/2 + 5, FOV/2 - 5);
+    t.distance = clamp(t.distance, MIN_RANGE, MAX_RANGE);
+
+    const p = polar(t.angle, t.distance);
+
+    const detected = Math.abs(beamAngle - t.angle) < BEAM_WIDTH/2;
+
+    const score = opticalScore(t.distance);
+    const level = levelFromScore(score);
+
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, t.size * (detected ? 1.15 : 0.9), 0, Math.PI * 2);
+    ctx.fillStyle = detected ? level.color : 'rgba(180,220,255,0.30)';
+    ctx.fill();
+
+    if (detected){
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, t.size + 4, 0, Math.PI * 2);
+      ctx.strokeStyle = level.color + '99';
+      ctx.lineWidth = 1.2;
+      ctx.stroke();
+
+      ctx.fillStyle = '#ffffff';
+      ctx.font = '11px Arial';
+      ctx.fillText(`${Math.round(t.distance)} m`, p.x + 12, p.y - 4);
+
+      ctx.fillStyle = level.color;
+      ctx.fillText(`Optical ${score}% (${level.name})`, p.x + 12, p.y + 10);
+
+      drawOpticalBar(p.x + 12, p.y + 16, level);
+    }
+  });
+
+  ctx.restore();
+}
+
+function drawSonarHead(){
+  ctx.beginPath();
+  ctx.moveTo(cx, cy);
+  ctx.lineTo(cx - 10, cy - 14);
+  ctx.lineTo(cx + 10, cy - 14);
+  ctx.closePath();
+  ctx.fillStyle = '#fff';
+  ctx.fill();
+  ctx.strokeStyle = '#555';
+  ctx.stroke();
+}
+
+function draw(){
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  drawBackgroundWedge();
+  drawRangeArcs();
+  drawTargets();
+  drawScanBeam();
+  drawSonarHead();
+}
+
+function loop(){
+  draw();
+  requestAnimationFrame(loop);
+}
+
+// Init targets from backend
+initTargets();
+loop();
+setInterval(initTargets, 14000);
